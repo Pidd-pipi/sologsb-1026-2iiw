@@ -37,6 +37,8 @@
     savedAt: string;
     note: string;
     activities: Activity[];
+    lessonMinutes?: number;
+    schedule?: ScheduleResult | null;
   }
 
   interface Course {
@@ -45,9 +47,32 @@
     level: string;
     ageRange: string;
     objective: string;
+    lessonMinutes: number;
+    schedule: ScheduleResult | null;
     activities: Activity[];
     versions: CourseVersion[];
     updatedAt: string;
+  }
+
+  interface LessonPlan {
+    index: number;
+    items: string[];
+    usedMinutes: number;
+  }
+
+  interface PendingItem {
+    activityId: string;
+    waitingOn: string[];
+  }
+
+  interface ScheduleResult {
+    generatedAt: string;
+    lessonMinutes: number;
+    signature: string;
+    lessons: LessonPlan[];
+    pending: PendingItem[];
+    unscheduled: string[];
+    cycle: string[] | null;
   }
 
   interface Diagnostic {
@@ -77,6 +102,8 @@
     level: '启蒙一级',
     ageRange: '5–6 岁',
     objective: '建立音素意识，能听辨、拼读并书写短元音单词。',
+    lessonMinutes: 40,
+    schedule: null,
     updatedAt: '2026-09-24T16:20:00+08:00',
     activities: [
       {
@@ -179,6 +206,10 @@
   $: errorCount = diagnostics.filter((issue) => issue.level === 'error').length;
   $: warningCount = diagnostics.filter((issue) => issue.level === 'warning').length;
   $: totalMinutes = course.activities.reduce((sum, activity) => sum + activity.duration, 0);
+  $: schedule = course.schedule;
+  $: scheduleStale = Boolean(schedule && schedule.signature !== scheduleSignature(course.activities, course.lessonMinutes));
+  $: scheduledCount = schedule ? schedule.lessons.reduce((sum, lesson) => sum + lesson.items.length, 0) : 0;
+  $: scheduleDiff = compareVersionSchedules(course, compareBaseId, compareTargetId);
 
   onMount(() => {
     const stored = localStorage.getItem(STORAGE_KEY);
@@ -210,6 +241,8 @@
   function migrateCourse(value: Course): Course {
     if (!value.id || !Array.isArray(value.activities)) return initialCourse();
     value.versions ??= [];
+    value.lessonMinutes = Number.isFinite(value.lessonMinutes) && value.lessonMinutes > 0 ? value.lessonMinutes : 40;
+    value.schedule ??= null;
     return value;
   }
 
@@ -356,7 +389,9 @@
       draft.versions.push({
         id: `v-${Date.now()}`, label: `版本 ${versionNumber}`, savedAt: new Date().toISOString(),
         note: `保存 ${draft.activities.length} 个活动，总计 ${draft.activities.reduce((sum, item) => sum + item.duration, 0)} 分钟。`,
-        activities: structuredClone(draft.activities)
+        activities: structuredClone(draft.activities),
+        lessonMinutes: draft.lessonMinutes,
+        schedule: structuredClone(draft.schedule)
       });
     });
     const latest = course.versions.at(-1);
@@ -507,6 +542,117 @@
     return rows;
   }
 
+  function scheduleSignature(activities: Activity[], lessonMinutes: number): string {
+    return JSON.stringify([lessonMinutes, activities.map((activity) => [activity.id, activity.duration, activity.dependencies])]);
+  }
+
+  function buildLessonSchedule(activities: Activity[], lessonMinutes: number): ScheduleResult {
+    const result: ScheduleResult = {
+      generatedAt: new Date().toISOString(),
+      lessonMinutes,
+      signature: scheduleSignature(activities, lessonMinutes),
+      lessons: [],
+      pending: [],
+      unscheduled: [],
+      cycle: null
+    };
+    const cycle = findDependencyCycle(activities);
+    if (cycle) {
+      result.cycle = cycle;
+      return result;
+    }
+    const placed = new Set<string>();
+    const remaining = activities.filter((activity) => {
+      if (activity.duration > lessonMinutes) {
+        result.unscheduled.push(activity.id);
+        return false;
+      }
+      return true;
+    });
+    let current: LessonPlan | null = null;
+    for (;;) {
+      const next = remaining.find((activity) => activity.dependencies.every((dependency) => placed.has(dependency)));
+      if (!next) break;
+      if (!current || current.usedMinutes + next.duration > lessonMinutes) {
+        current = { index: result.lessons.length + 1, items: [], usedMinutes: 0 };
+        result.lessons.push(current);
+      }
+      current.items.push(next.id);
+      current.usedMinutes += next.duration;
+      placed.add(next.id);
+      remaining.splice(remaining.indexOf(next), 1);
+    }
+    result.pending = remaining.map((activity) => ({
+      activityId: activity.id,
+      waitingOn: activity.dependencies.filter((dependency) => !placed.has(dependency))
+    }));
+    return result;
+  }
+
+  function generateSchedule(): void {
+    const result = buildLessonSchedule(course.activities, course.lessonMinutes);
+    commit((draft) => { draft.schedule = result; });
+    savedLabel = result.cycle
+      ? '检测到循环依赖，本次未生成课次'
+      : `已生成 ${result.lessons.length} 节课 · ${formatTime(result.generatedAt)}`;
+  }
+
+  function updateLessonMinutes(value: number): void {
+    if (!Number.isFinite(value) || value < 1) return;
+    commit((draft) => { draft.lessonMinutes = Math.min(240, Math.round(value)); });
+  }
+
+  function findActivity(id: string): Activity | undefined {
+    return course.activities.find((activity) => activity.id === id);
+  }
+
+  function activityTitle(id: string): string {
+    return findActivity(id)?.title ?? '（活动已删除）';
+  }
+
+  function dependencyLabel(id: string): string {
+    const activity = findActivity(id);
+    if (!activity) return '已删除的活动';
+    return schedule?.unscheduled.includes(id) ? `${activity.title}（未排入）` : activity.title;
+  }
+
+  function compareVersionSchedules(current: Course, baseId: string, targetId: string): VersionDiff[] {
+    const base = current.versions.find((version) => version.id === baseId);
+    const target = current.versions.find((version) => version.id === targetId);
+    if (!base || !target) return [];
+    const before = base.schedule ?? null;
+    const after = target.schedule ?? null;
+    if (!before && !after) return [];
+    const titleOf = (id: string) =>
+      target.activities.find((activity) => activity.id === id)?.title
+      ?? base.activities.find((activity) => activity.id === id)?.title
+      ?? current.activities.find((activity) => activity.id === id)?.title
+      ?? id;
+    if (!before && after) return [{ id: 'schedule', title: '课次安排', kind: 'added', detail: `新增 ${after.lessons.length} 节课 · 每节 ${after.lessonMinutes} 分钟` }];
+    if (before && !after) return [{ id: 'schedule', title: '课次安排', kind: 'removed', detail: `原有 ${before.lessons.length} 节课未保留` }];
+    if (!before || !after) return [];
+    const rows: VersionDiff[] = [];
+    if (before.lessonMinutes !== after.lessonMinutes) rows.push({ id: 'schedule-minutes', title: '每节课时长', kind: 'changed', detail: `${before.lessonMinutes} → ${after.lessonMinutes} 分钟` });
+    if (before.lessons.length !== after.lessons.length) rows.push({ id: 'schedule-count', title: '课次数量', kind: 'changed', detail: `${before.lessons.length} → ${after.lessons.length} 节课` });
+    const shared = Math.min(before.lessons.length, after.lessons.length);
+    for (let index = 0; index < shared; index += 1) {
+      const a = before.lessons[index];
+      const b = after.lessons[index];
+      if (JSON.stringify(a.items) === JSON.stringify(b.items)) continue;
+      const added = b.items.filter((id) => !a.items.includes(id)).map(titleOf);
+      const removed = a.items.filter((id) => !b.items.includes(id)).map(titleOf);
+      const parts: string[] = [];
+      if (added.length) parts.push(`排入 ${added.join('、')}`);
+      if (removed.length) parts.push(`移出 ${removed.join('、')}`);
+      if (!parts.length) parts.push('课内顺序调整');
+      rows.push({ id: `schedule-lesson-${index}`, title: `第 ${index + 1} 课`, kind: 'changed', detail: parts.join('；') });
+    }
+    if (before.pending.length !== after.pending.length) rows.push({ id: 'schedule-pending', title: '待处理活动', kind: 'changed', detail: `${before.pending.length} → ${after.pending.length} 个` });
+    if (before.unscheduled.length !== after.unscheduled.length) rows.push({ id: 'schedule-unscheduled', title: '未排入活动', kind: 'changed', detail: `${before.unscheduled.length} → ${after.unscheduled.length} 个` });
+    if (Boolean(before.cycle) !== Boolean(after.cycle)) rows.push({ id: 'schedule-cycle', title: '循环依赖', kind: 'changed', detail: after.cycle ? '目标版本检测到循环依赖，未生成课次' : '目标版本已解除循环依赖' });
+    return rows;
+  }
+
   function formatTime(value: string): string {
     const date = new Date(value);
     if (Number.isNaN(date.getTime())) return value;
@@ -594,7 +740,7 @@
 
   <nav class="workspace-tabs" aria-label="工作区">
     <button class:active={activeView === 'compose'} on:click={() => activeView = 'compose'}><span>01</span><b>课程编排</b><small>活动、依赖与教学说明</small></button>
-    <button class:active={activeView === 'path'} on:click={() => activeView = 'path'}><span>02</span><b>学习路径</b><small>多屏幕顺序预览</small></button>
+    <button class:active={activeView === 'path'} on:click={() => activeView = 'path'}><span>02</span><b>学习路径</b><small>授课安排与顺序预览</small></button>
     <button class:active={activeView === 'issues'} on:click={() => activeView = 'issues'}><span>03</span><b>质量检查</b><small>音素、句子与反馈</small></button>
     <button class:active={activeView === 'versions'} on:click={() => activeView = 'versions'}><span>04</span><b>版本与复用</b><small>复制、存档与比较</small></button>
   </nav>
@@ -712,6 +858,92 @@
           <button class:active={previewWidth === 'desktop'} on:click={() => previewWidth = 'desktop'}>桌面</button>
         </div>
       </div>
+      <section class="schedule-panel" aria-label="授课安排">
+        <div class="schedule-head">
+          <div>
+            <span class="kicker">LESSON PLAN</span>
+            <h2>授课安排</h2>
+            <p>填写每节课分钟数，系统按当前顺序和依赖把活动装入连续课次；前置未排入的活动留在待处理区，超过课时上限的活动标为未排入。</p>
+          </div>
+          <div class="schedule-controls">
+            <TextInput labelText="每节课分钟数" type="number" min="5" max="240" value={String(course.lessonMinutes)} on:change={(event) => updateLessonMinutes(readNumber(event))} />
+            <Button kind="primary" on:click={generateSchedule}>{schedule ? '重新生成课次' : '生成课次'}</Button>
+          </div>
+        </div>
+        {#if schedule && schedule.cycle}
+          <div class="schedule-notice">
+            <InlineNotification lowContrast kind="error" title="课程存在循环依赖，本次未生成课次" subtitle={`相关活动：${schedule.cycle.map(activityTitle).join(' → ')}。请调整依赖关系后重新生成。`} />
+          </div>
+        {:else if schedule}
+          {#if scheduleStale}
+            <div class="schedule-notice">
+              <InlineNotification lowContrast kind="warning" title="课程内容或课时已变化" subtitle="课次可能与最新活动不一致，点击「重新生成课次」更新。" />
+            </div>
+          {/if}
+          <div class="schedule-summary">
+            <span><b>{schedule.lessons.length}</b> 节课</span>
+            <span><b>{scheduledCount}</b> 个活动已排入</span>
+            <span><b>{schedule.pending.length}</b> 待处理</span>
+            <span><b>{schedule.unscheduled.length}</b> 未排入</span>
+            <span class="schedule-meta">每节 {schedule.lessonMinutes} 分钟 · 生成于 {formatTime(schedule.generatedAt)}</span>
+          </div>
+          <div class="schedule-body">
+            <div class="lesson-grid">
+              {#each schedule.lessons as lesson (lesson.index)}
+                <article class="lesson-card">
+                  <header><b>第 {lesson.index} 课</b><span>{lesson.usedMinutes}/{schedule.lessonMinutes} 分钟</span></header>
+                  <ol>
+                    {#each lesson.items as activityId (activityId)}
+                      {@const activity = findActivity(activityId)}
+                      {#if activity}
+                        <li>
+                          <span class="activity-type {activity.type}">{activity.type}</span>
+                          <span class="lesson-item-title">{activity.title}</span>
+                          <em>{activity.duration}′</em>
+                        </li>
+                      {:else}
+                        <li class="missing"><span class="lesson-item-title">（活动已删除）</span></li>
+                      {/if}
+                    {/each}
+                  </ol>
+                </article>
+              {:else}
+                <p class="empty-state">没有活动排入课次，请查看右侧待处理区与未排入原因。</p>
+              {/each}
+            </div>
+            <aside class="schedule-side">
+              <section class="pending-area">
+                <h3>待处理区 <span>{schedule.pending.length}</span></h3>
+                <p class="side-hint">前置内容尚未排入，调整顺序或依赖后重新生成。</p>
+                {#each schedule.pending as item (item.activityId)}
+                  <div class="side-row">
+                    <b>{activityTitle(item.activityId)}</b>
+                    <small>等待前置：{item.waitingOn.map(dependencyLabel).join('、')}</small>
+                  </div>
+                {:else}
+                  <p class="empty-state">没有等待前置的活动。</p>
+                {/each}
+              </section>
+              <section class="unscheduled-area">
+                <h3>未排入 <span>{schedule.unscheduled.length}</span></h3>
+                <p class="side-hint">单个活动超过每节课分钟数上限，请拆分活动或调高课时。</p>
+                {#each schedule.unscheduled as activityId (activityId)}
+                  {@const activity = findActivity(activityId)}
+                  <div class="side-row">
+                    <b>{activityTitle(activityId)}</b>
+                    <small>{activity ? `${activity.duration} 分钟超过课时上限 ${schedule.lessonMinutes} 分钟` : '活动已删除'}</small>
+                  </div>
+                {:else}
+                  <p class="empty-state">没有超时的活动。</p>
+                {/each}
+              </section>
+            </aside>
+          </div>
+        {:else}
+          <p class="empty-state schedule-empty">尚未生成课次。填写每节课分钟数后点击「生成课次」，安排会随课程保存，存档版本后可在版本页比较课次变化。</p>
+        {/if}
+      </section>
+
       <div class="preview-stage">
         <div class="device-preview {previewWidth}">
           <div class="device-bar"><span></span><b>{previewWidth === 'phone' ? '390 px' : previewWidth === 'tablet' ? '768 px' : '1200 px'}</b></div>
@@ -799,6 +1031,16 @@
               <article class={diff.kind}><span>{diff.kind === 'added' ? '新增' : diff.kind === 'removed' ? '删除' : '修改'}</span><div><b>{diff.title}</b><p>{diff.detail}</p></div></article>
             {:else}
               <p class="empty-state">两个版本之间没有活动差异，或尚未选择版本。</p>
+            {/each}
+          </div>
+          <div class="section-title schedule-diff-title">
+            <div><span class="kicker">LESSON PLAN</span><h3>课次变化</h3><p>比较两个版本之间课次数量、课内活动和待处理区的变化。</p></div>
+          </div>
+          <div class="diff-list">
+            {#each scheduleDiff as diff}
+              <article class={diff.kind}><span>{diff.kind === 'added' ? '新增' : diff.kind === 'removed' ? '删除' : '修改'}</span><div><b>{diff.title}</b><p>{diff.detail}</p></div></article>
+            {:else}
+              <p class="empty-state">两个版本的授课安排一致，或所选版本尚未保存课次。</p>
             {/each}
           </div>
         </Tile>
