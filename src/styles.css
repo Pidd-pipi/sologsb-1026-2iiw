@@ -132,6 +132,34 @@ button, input, textarea, select { font: inherit; }
 .lesson-tags span { padding: 2px 6px; color: #004144; background: #d9fbfb; font: 500 10px "IBM Plex Mono", monospace; }
 .lesson-tags em { margin-left: auto; color: #6f6f6f; font-size: 10px; font-style: normal; }
 .lesson-preview footer { padding: 18px; text-align: center; color: #fff; background: #161616; font-size: 11px; }
+.schedule-card { margin-bottom: 26px; padding: 24px; border: 1px solid #e0e0e0; background: #fff; }
+.schedule-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; flex-wrap: wrap; }
+.schedule-head h2 { margin: 0; font-size: 22px; letter-spacing: -.02em; }
+.schedule-head p { max-width: 640px; margin: 6px 0 0; color: #6f6f6f; font-size: 12px; line-height: 1.7; }
+.schedule-controls { display: flex; align-items: flex-end; gap: 12px; }
+.schedule-controls .minutes-field { width: 160px; }
+.schedule-controls :global(.bx--form-item) { margin-bottom: 0; }
+.schedule-notice { margin-top: 16px; }
+.lesson-grid { margin-top: 18px; display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 12px; align-items: start; }
+.lesson-card { border: 1px solid #e0e0e0; border-top: 3px solid #0f62fe; background: #fff; }
+.lesson-card.pending { border-top-color: #f1c21b; background: #fcf8e8; }
+.lesson-card > header { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 11px 14px; border-bottom: 1px solid #e0e0e0; }
+.lesson-card > header b { font-size: 13px; }
+.lesson-card > header span { color: #6f6f6f; font: 500 10px "IBM Plex Mono", monospace; }
+.lesson-item { display: flex; align-items: flex-start; gap: 10px; padding: 10px 14px; border-bottom: 1px solid #f0f0f0; }
+.lesson-item:last-child { border-bottom: 0; }
+.lesson-item .activity-type { flex: 0 0 auto; margin-top: 2px; padding: 3px 4px; color: #0043ce; background: #edf5ff; font-size: 9px; }
+.lesson-item .activity-type.单词 { color: #6929c4; background: #f6f2ff; }
+.lesson-item .activity-type.句子 { color: #9f1853; background: #fff0f7; }
+.lesson-item .activity-type.练习 { color: #005d5d; background: #d9fbfb; }
+.lesson-item b, .lesson-item small, .lesson-item em { display: block; }
+.lesson-item b { font-size: 12px; line-height: 1.4; }
+.lesson-item small { margin-top: 2px; color: #8d8d8d; font-size: 10px; }
+.lesson-item em { margin-top: 3px; font-size: 10px; font-style: normal; line-height: 1.5; }
+.lesson-item em.unplaced { color: #a2191f; }
+.lesson-item em.waiting { color: #8a6d1a; }
+.schedule-meta { margin: 14px 0 0; color: #8d8d8d; font-size: 11px; }
+.schedule-empty { margin: 16px 0 0; padding: 24px; border: 1px dashed #c6c6c6; text-align: center; }
 .device-preview.phone .lesson-preview { padding: 12px; }
 .device-preview.phone .lesson-preview > article { grid-template-columns: 34px 1fr; }
 .device-preview.phone .lesson-type { grid-column: 2; width: fit-content; }
@@ -173,9 +201,11 @@ button, input, textarea, select { font: inherit; }
 .diff-list article { display: grid; grid-template-columns: 55px 1fr; gap: 12px; padding: 12px; border-left: 4px solid #8a3ffc; background: #f6f2ff; }
 .diff-list article.added { border-left-color: #198038; background: #defbe6; }
 .diff-list article.removed { border-left-color: #da1e28; background: #fff1f1; }
+.diff-list article.schedule { border-left-color: #0f62fe; background: #edf5ff; }
 .diff-list article > span { color: #6929c4; font-size: 10px; font-weight: 700; }
 .diff-list article.added > span { color: #0e6027; }
 .diff-list article.removed > span { color: #a2191f; }
+.diff-list article.schedule > span { color: #0043ce; }
 .diff-list b { font-size: 12px; }
 .diff-list p { margin: 3px 0 0; color: #6f6f6f; font-size: 10px; }
 .app-footer { min-height: 46px; padding: 14px 24px; display: flex; justify-content: space-between; gap: 20px; color: #c6c6c6; background: #262626; font-size: 10px; }
@@ -196,6 +226,9 @@ button, input, textarea, select { font: inherit; }
   .activity-row { min-width: 260px; border-right: 1px solid #e0e0e0; }
   .editor-column, .inspector { padding: 14px; }
   .inspector, .path-toolbar, .view-heading { display: flex; align-items: stretch; flex-direction: column; }
+  .schedule-head { flex-direction: column; align-items: stretch; }
+  .schedule-controls { flex-wrap: wrap; }
+  .schedule-controls .minutes-field { width: 100%; max-width: 280px; }
   .preview-stage { padding: 8px; }
   .device-preview.tablet, .device-preview.desktop { width: 100%; }
   .rule-grid, .version-layout-svelte { grid-template-columns: 1fr; }

@@ -11,6 +11,8 @@
     TextInput,
     Tile
   } from 'carbon-components-svelte';
+  import { buildSchedule, diffSchedules, findDependencyCycle, scheduleSignature } from '$lib/schedule';
+  import type { SchedulePlan } from '$lib/schedule';
 
   type ActivityType = '音素' | '单词' | '句子' | '练习';
   type ViewMode = 'compose' | 'path' | 'issues' | 'versions';
@@ -37,6 +39,7 @@
     savedAt: string;
     note: string;
     activities: Activity[];
+    schedule: SchedulePlan | null;
   }
 
   interface Course {
@@ -46,6 +49,7 @@
     ageRange: string;
     objective: string;
     activities: Activity[];
+    schedule: SchedulePlan | null;
     versions: CourseVersion[];
     updatedAt: string;
   }
@@ -62,7 +66,7 @@
   interface VersionDiff {
     id: string;
     title: string;
-    kind: 'added' | 'removed' | 'changed';
+    kind: 'added' | 'removed' | 'changed' | 'schedule';
     detail: string;
   }
 
@@ -77,6 +81,7 @@
     level: '启蒙一级',
     ageRange: '5–6 岁',
     objective: '建立音素意识，能听辨、拼读并书写短元音单词。',
+    schedule: null,
     updatedAt: '2026-09-24T16:20:00+08:00',
     activities: [
       {
@@ -131,7 +136,7 @@
     versions: [
       {
         id: 'v-1', label: '初稿', savedAt: '2026-09-21T10:00:00+08:00', note: '完成音素和基础拼读活动。',
-        activities: []
+        activities: [], schedule: null
       },
       {
         id: 'v-2', label: '增加句子迁移', savedAt: '2026-09-24T15:30:00+08:00', note: '补充 A man sat and had a nap.',
@@ -152,7 +157,8 @@
             id: 'a-6', type: '句子', title: '拼读句子：Mat sat.', content: 'Mat sat on the mat.', phonemes: ['/m/', '/æ/', '/s/', '/t/'], dependencies: ['a-3'], difficulty: 3,
             prompt: '先读每个单词，再按意群连读。', accessibility: '按词高亮。', duration: 10, feedback: '再试试更连贯。'
           }
-        ]
+        ],
+        schedule: null
       }
     ]
   });
@@ -172,6 +178,15 @@
   let selectedActivity: Activity | null = null;
   let diagnostics: Diagnostic[] = [];
   let versionDiff: VersionDiff[] = [];
+  let schedule: SchedulePlan | null = null;
+  let lessonMinutesInput = 40;
+  let scheduleNotice: { kind: 'error' | 'warning'; title: string; subtitle: string } | null = null;
+
+  $: selectedActivity = course.activities.find((activity) => activity.id === selectedActivityId) ?? course.activities[0] ?? null;
+  $: diagnostics = analyzeCourse(course);
+  $: versionDiff = compareCourseVersions(course, compareBaseId, compareTargetId);
+  $: schedule = course.schedule;
+  $: scheduleStale = Boolean(schedule && schedule.signature !== scheduleSignature(course.activities));
 
   $: selectedActivity = course.activities.find((activity) => activity.id === selectedActivityId) ?? course.activities[0] ?? null;
   $: diagnostics = analyzeCourse(course);
@@ -188,6 +203,7 @@
         selectedActivityId = course.activities[0]?.id ?? '';
         compareBaseId = course.versions[0]?.id ?? '';
         compareTargetId = course.versions.at(-1)?.id ?? '';
+        lessonMinutesInput = course.schedule?.lessonMinutes ?? 40;
         savedLabel = `已恢复 · ${formatTime(course.updatedAt)}`;
       } catch {
         localStorage.removeItem(STORAGE_KEY);
@@ -210,6 +226,8 @@
   function migrateCourse(value: Course): Course {
     if (!value.id || !Array.isArray(value.activities)) return initialCourse();
     value.versions ??= [];
+    value.schedule ??= null;
+    value.versions.forEach((version) => { version.schedule ??= null; });
     return value;
   }
 
@@ -355,8 +373,9 @@
     commit((draft) => {
       draft.versions.push({
         id: `v-${Date.now()}`, label: `版本 ${versionNumber}`, savedAt: new Date().toISOString(),
-        note: `保存 ${draft.activities.length} 个活动，总计 ${draft.activities.reduce((sum, item) => sum + item.duration, 0)} 分钟。`,
-        activities: structuredClone(draft.activities)
+        note: `保存 ${draft.activities.length} 个活动，总计 ${draft.activities.reduce((sum, item) => sum + item.duration, 0)} 分钟${draft.schedule ? `，含 ${draft.schedule.lessons.length} 节课安排` : ''}。`,
+        activities: structuredClone(draft.activities),
+        schedule: structuredClone(draft.schedule)
       });
     });
     const latest = course.versions.at(-1);
@@ -452,30 +471,38 @@
     return issues;
   }
 
-  function findDependencyCycle(activities: Activity[]): string[] | null {
-    const byId = new Map(activities.map((activity) => [activity.id, activity]));
-    const visiting = new Set<string>();
-    const visited = new Set<string>();
-    let cycle: string[] = [];
-    const visit = (id: string, path: string[]): boolean => {
-      if (visiting.has(id)) {
-        cycle = [...path.slice(path.indexOf(id)), id];
-        return true;
-      }
-      if (visited.has(id)) return false;
-      visiting.add(id);
-      const activity = byId.get(id);
-      for (const dependency of activity?.dependencies ?? []) {
-        if (visit(dependency, [...path, dependency])) return true;
-      }
-      visiting.delete(id);
-      visited.add(id);
-      return false;
-    };
-    for (const activity of activities) {
-      if (visit(activity.id, [activity.id])) break;
+  function generateSchedule(): void {
+    const lessonMinutes = Math.floor(lessonMinutesInput);
+    if (!Number.isFinite(lessonMinutes) || lessonMinutes < 1) {
+      scheduleNotice = {
+        kind: 'warning', title: '请先填写有效的每节课分钟数',
+        subtitle: '分钟数需为大于 0 的整数，生成前不会改动已有安排。'
+      };
+      return;
     }
-    return cycle.length ? cycle : null;
+    const cycle = findDependencyCycle(course.activities);
+    if (cycle) {
+      scheduleNotice = {
+        kind: 'error', title: '存在循环依赖，本次未生成课次',
+        subtitle: `相关活动：${cycle.map((id) => activityTitle(id)).join(' → ')}。请先在“课程编排”中调整依赖后再生成。`
+      };
+      return;
+    }
+    scheduleNotice = null;
+    commit((draft) => {
+      draft.schedule = buildSchedule(draft.activities, lessonMinutes);
+    });
+    const lessonCount = course.schedule?.lessons.length ?? 0;
+    const pendingCount = course.schedule?.pending.length ?? 0;
+    savedLabel = `已生成 ${lessonCount} 节课${pendingCount ? ` · ${pendingCount} 个活动待处理` : ''}`;
+  }
+
+  function activityTitle(id: string, fallback = id): string {
+    return course.activities.find((activity) => activity.id === id)?.title ?? fallback;
+  }
+
+  function dependencyTitles(ids: string[]): string {
+    return ids.map((id) => activityTitle(id)).join('、');
   }
 
   function compareCourseVersions(current: Course, baseId: string, targetId: string): VersionDiff[] {
@@ -504,6 +531,7 @@
       if (before.feedback !== activity.feedback) fields.push('练习反馈');
       if (fields.length) rows.push({ id: activity.id, title: activity.title, kind: 'changed', detail: `变化字段：${fields.join('、')}` });
     }
+    rows.push(...diffSchedules(base, target));
     return rows;
   }
 
@@ -594,7 +622,7 @@
 
   <nav class="workspace-tabs" aria-label="工作区">
     <button class:active={activeView === 'compose'} on:click={() => activeView = 'compose'}><span>01</span><b>课程编排</b><small>活动、依赖与教学说明</small></button>
-    <button class:active={activeView === 'path'} on:click={() => activeView = 'path'}><span>02</span><b>学习路径</b><small>多屏幕顺序预览</small></button>
+    <button class:active={activeView === 'path'} on:click={() => activeView = 'path'}><span>02</span><b>学习路径</b><small>授课安排与顺序预览</small></button>
     <button class:active={activeView === 'issues'} on:click={() => activeView = 'issues'}><span>03</span><b>质量检查</b><small>音素、句子与反馈</small></button>
     <button class:active={activeView === 'versions'} on:click={() => activeView = 'versions'}><span>04</span><b>版本与复用</b><small>复制、存档与比较</small></button>
   </nav>
@@ -712,6 +740,83 @@
           <button class:active={previewWidth === 'desktop'} on:click={() => previewWidth = 'desktop'}>桌面</button>
         </div>
       </div>
+
+      <section class="schedule-card" aria-label="授课安排">
+        <div class="schedule-head">
+          <div>
+            <span class="kicker">TEACHING SCHEDULE</span>
+            <h2>授课安排</h2>
+            <p>填写每节课分钟数后，按当前活动顺序和依赖生成连续课次；前置内容没有排入时，后续活动留在待处理区；单个活动超过课时上限会标记为未排入。</p>
+          </div>
+          <div class="schedule-controls">
+            <div class="minutes-field">
+              <TextInput labelText="每节课分钟数" type="number" min="5" max="120" value={String(lessonMinutesInput)} on:input={(event) => lessonMinutesInput = readNumber(event)} />
+            </div>
+            <Button kind="primary" on:click={generateSchedule}>生成课次</Button>
+          </div>
+        </div>
+
+        {#if scheduleNotice}
+          <div class="schedule-notice">
+            <InlineNotification lowContrast kind={scheduleNotice.kind} title={scheduleNotice.title} subtitle={scheduleNotice.subtitle} on:close={() => scheduleNotice = null} />
+          </div>
+        {/if}
+
+        {#if schedule}
+          {#if scheduleStale}
+            <div class="schedule-notice">
+              <InlineNotification lowContrast kind="warning" hideCloseButton title="课程内容已变化，课次可能过期" subtitle="活动顺序、时长或依赖在上次生成后发生调整，请重新生成课次；更新前仍可查看下面的旧安排。" />
+            </div>
+          {/if}
+          <div class="lesson-grid">
+            {#each schedule.lessons as lesson, index (index)}
+              <article class="lesson-card">
+                <header>
+                  <b>第 {index + 1} 节</b>
+                  <span>{lesson.totalMinutes} / {schedule.lessonMinutes} 分钟</span>
+                </header>
+                {#each lesson.items as item (item.id)}
+                  <div class="lesson-item">
+                    <span class="activity-type {item.type}">{item.type}</span>
+                    <div>
+                      <b>{activityTitle(item.id, item.title)}</b>
+                      <small>{item.duration} 分钟{#if item.dependencies.length} · 前置：{dependencyTitles(item.dependencies)}{/if}</small>
+                    </div>
+                  </div>
+                {/each}
+              </article>
+            {/each}
+            {#if schedule.pending.length}
+              <article class="lesson-card pending">
+                <header>
+                  <b>待处理区</b>
+                  <span>{schedule.pending.length} 个活动</span>
+                </header>
+                {#each schedule.pending as item (item.id)}
+                  <div class="lesson-item">
+                    <span class="activity-type {item.type}">{item.type}</span>
+                    <div>
+                      <b>{activityTitle(item.id, item.title)}</b>
+                      <small>{item.duration} 分钟</small>
+                      {#if item.reason === 'unplaced'}
+                        <em class="unplaced">未排入 · 超过每节 {schedule.lessonMinutes} 分钟上限</em>
+                      {:else}
+                        <em class="waiting">等待前置：{item.blockedBy.join('、')}</em>
+                      {/if}
+                    </div>
+                  </div>
+                {/each}
+              </article>
+            {/if}
+          </div>
+          <p class="schedule-meta">
+            生成于 {formatTime(schedule.generatedAt)} · 每节 {schedule.lessonMinutes} 分钟 · 共 {schedule.lessons.length} 节课{schedule.pending.length ? ` · ${schedule.pending.length} 个活动待处理` : ''} · 安排随课程自动保存
+          </p>
+        {:else}
+          <p class="empty-state schedule-empty">尚未生成授课安排。填写每节课分钟数后点击“生成课次”，安排会随课程保存，关闭浏览器后再次打开仍可查看。</p>
+        {/if}
+      </section>
+
       <div class="preview-stage">
         <div class="device-preview {previewWidth}">
           <div class="device-bar"><span></span><b>{previewWidth === 'phone' ? '390 px' : previewWidth === 'tablet' ? '768 px' : '1200 px'}</b></div>
@@ -780,7 +885,7 @@
           {#each course.versions as version, index (version.id)}
             <article class:latest={index === course.versions.length - 1}>
               <span class="timeline-dot"></span>
-              <div><b>{version.label}</b><h4>{version.note}</h4><p>{formatTime(version.savedAt)} · {version.activities.length} 个活动</p></div>
+              <div><b>{version.label}</b><h4>{version.note}</h4><p>{formatTime(version.savedAt)} · {version.activities.length} 个活动{version.schedule ? ` · ${version.schedule.lessons.length} 节课` : ''}</p></div>
             </article>
           {/each}
         </Tile>
@@ -796,7 +901,7 @@
           </div>
           <div class="diff-list">
             {#each versionDiff as diff}
-              <article class={diff.kind}><span>{diff.kind === 'added' ? '新增' : diff.kind === 'removed' ? '删除' : '修改'}</span><div><b>{diff.title}</b><p>{diff.detail}</p></div></article>
+              <article class={diff.kind}><span>{diff.kind === 'added' ? '新增' : diff.kind === 'removed' ? '删除' : diff.kind === 'schedule' ? '课次' : '修改'}</span><div><b>{diff.title}</b><p>{diff.detail}</p></div></article>
             {:else}
               <p class="empty-state">两个版本之间没有活动差异，或尚未选择版本。</p>
             {/each}
